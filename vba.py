@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 import enum
 import re
-from typing import Iterable, Iterator, List
+from typing import Dict, Iterable, Iterator, List, Set, Tuple
 import random
 import string
 
@@ -19,19 +19,24 @@ RE_IDENTIFIER_USE = r"(?P<pre>[\W\D])%NAME%(?P<post>[\W\D])?"  # Matches %NAME% 
 RE_IDENTIFIER_SUB = r"\g<pre>%NAME%\g<post>"
 RE_STRINGS = r"\"[^\"]*\""  # Matches everything between two double-quotes
 
-NAMES = set()
-DEFAULT_NAME_LENGTH = 8
+NAMES: Dict[Tuple[int, str], Set[str]] = {}  # Saves all generated names per length/alphabet combination
+DEFAULT_NAME_LENGTH = 8  # TODO: Remove
 
 
 def randomName(length=DEFAULT_NAME_LENGTH, alphabet: str = string.ascii_letters):
+    names = NAMES.get((length, alphabet), None)
+    if names is None:
+        names = NAMES[(length, alphabet)] = set()
+
     MAX = pow(len(alphabet), length)
-    if len(NAMES) >= MAX:
+    if len(names) >= MAX:
         raise Exception(f'Exceeded maximum of {MAX} random names with {length} elements of alphabet "{alphabet}"')
+
     while True:
         name = ''.join(random.choices(alphabet, k=length))
         if name in NAMES:
             continue
-        NAMES.add(name)
+        names.add(name)
         return name
 
 
@@ -41,6 +46,15 @@ class String:
     startIdx: int
     endIdx: int
     codeLine: 'CodeLine'
+    newString: str = None
+
+    @property
+    def exportString(self) -> str:
+        return self.newString if self.newString is not None else self.value
+
+    @exportString.setter
+    def exportString(self, newString: str):
+        self.newString = newString
 
 
 class CodeLineType(enum.Enum):
@@ -172,6 +186,19 @@ class CodeLine:
             _line.method = meth
         _line.prev = _prev
         return _line
+
+    def replaceString(self, st: String, repl: str):
+        following = [string for string in self.strings if string.startIdx > st.endIdx]
+        diff = len(repl) - len(st.value)
+
+        # Update line contents
+        self.exportLine = self.exportLine[:st.startIdx] + repl + self.exportLine[st.endIdx:]
+        st.endIdx = st.startIdx + len(repl)
+        st.newString = repl
+
+        for _st in following:  # Update indices of following strings
+            _st.startIdx += diff
+            _st.endIdx += diff
 
     def __repr__(self) -> str:
         return self.exportLine
