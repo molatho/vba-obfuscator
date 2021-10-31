@@ -1,7 +1,7 @@
 from dataclasses import dataclass, replace
 import enum
 import re
-from typing import Iterator, List
+from typing import Iterable, Iterator, List
 import random
 import string
 
@@ -24,6 +24,9 @@ DEFAULT_NAME_LENGTH = 8
 
 
 def randomName(length=DEFAULT_NAME_LENGTH, alphabet: str = string.ascii_letters):
+    MAX = pow(len(alphabet), length)
+    if len(NAMES) >= MAX:
+        raise Exception(f'Exceeded maximum of {MAX} random names with {length} elements of alphabet "{alphabet}"')
     while True:
         name = ''.join(random.choices(alphabet, k=length))
         if name in NAMES:
@@ -40,13 +43,72 @@ class String:
     codeLine: 'CodeLine'
 
 
+class CodeLineType(enum.Enum):
+    Default = 0,
+    MethodStart = 1,
+    MethodEnd = 2
+
+
 class CodeLine:
-    def __init__(self, line: str, number: int):
+    def __init__(self, line: str, number: int = -1, method: 'Method' = None, lineType: CodeLineType = CodeLineType.Default):
         self.line: str = line
         self.number: int = number
-        self.method: Method = None
+        self.method: Method = method
+        self.lineType: CodeLineType = lineType
         self._newLine: str = None
+        self._prev: CodeLine = None
+        self._next: CodeLine = None
         self.strings: List[String] = self.getStrings()
+
+    @property
+    def next(self) -> 'CodeLine':
+        return self._next
+
+    @next.setter
+    def next(self, next: 'CodeLine'):
+        if next is self._next:
+            return
+
+        old = self._next
+        self._next = next
+
+        if old is not None:
+            old.prev = None
+        if next is not None:
+            next.prev = self
+
+    @property
+    def isFirst(self) -> bool:
+        return self._prev is None
+
+    @property
+    def isLast(self) -> bool:
+        return self._next is None
+
+    @property
+    def first(self) -> 'CodeLine':
+        return self if self.isFirst else self._prev
+
+    @property
+    def last(self) -> 'CodeLine':
+        return self if self.isLast else self._next
+
+    @property
+    def prev(self) -> 'CodeLine':
+        return self._prev
+
+    @prev.setter
+    def prev(self, prev: 'CodeLine'):
+        if prev is self._prev:
+            return
+
+        old = self._prev
+        self._prev = prev
+
+        if old is not None:
+            old.next = None
+        if prev is not None:
+            prev.next = self
 
     def getStrings(self) -> List[String]:
         return [
@@ -68,6 +130,48 @@ class CodeLine:
     @property
     def isEmpty(self) -> str:
         return len(self.exportLine.strip()) == 0
+
+    def replaceWith(self, newLines: List['CodeLine']):
+        _next = self._next
+        _prev = self._prev
+
+        if _next is not None:
+            _next.insertBefore(newLines)
+        elif _prev is not None:
+            _prev.insertAfter(newLines)
+        else:
+            raise Exception("Can't replace line with new lines: no preceeding/succeeding lines to link to")
+
+    def remove(self) -> 'CodeLine':
+        if self._next is not None:
+            self._next.prev = self._prev
+        elif self._prev is not None:
+            self._prev.next = self._next
+        else:
+            raise Exception("Can't remove line: no preceeding/succeeding lines to unlink from")
+        return self
+
+    def insertAfter(self, newLines: List['CodeLine']) -> 'CodeLine':
+        _next = self._next
+        meth = _next.method if next is not None else None
+        _line = self
+        for line in newLines:
+            _line.next = line
+            _line = line
+            _line.method = meth
+        _line.next = _next
+        return _line
+
+    def insertBefore(self, newLines: List['CodeLine']) -> 'CodeLine':
+        _prev = self._prev
+        meth = _prev.method if next is not None else None
+        _line = self
+        for line in newLines:
+            _line.prev = line
+            _line = line
+            _line.method = meth
+        _line.prev = _prev
+        return _line
 
     def __repr__(self) -> str:
         return self.exportLine
@@ -116,23 +220,43 @@ class Parameter:
 
 
 class Method:
-    def __init__(self, returnType: str, modifier: str, name: str, type: str):
+    def __init__(self, file: 'File', returnType: str, modifier: str, name: str, type: str):
         self.returnType: str = returnType
         self.modifier: str = modifier
         self.name: str = name
         self.type: str = type
+        self._file: 'File' = file
         self.parameters: List[Variable] = []
         self.variables: List[Variable] = []
-        self.codeLines: List[CodeLine] = []
+
+    @property
+    def codeLinesIter(self) -> Iterator[CodeLine]:
+        return (line for line in self._file.originalLines if line.method is self)
+
+    @property
+    def codeLines(self) -> List[CodeLine]:
+        return list(self.codeLinesIter)
 
     @property
     def exportName(self) -> str:
         return self.newName if self.newName else self.name
 
+    @property
+    def firstLine(self) -> CodeLine:
+        return next(self.codeLinesIter)
+
+    @property
+    def lastLine(self) -> CodeLine:
+        iter = next(self.codeLinesIter)
+        last = next(iter)
+        for last in iter:
+            pass
+        return last
+
     @exportName.setter
     def exportName(self, newName):
         self.newName = newName
-        self.codeLines[0].exportLine = self.signature
+        self.firstLine.exportLine = self.signature
 
     @property
     def signature(self) -> str:
@@ -143,27 +267,28 @@ class Method:
                    )
         )
 
-    def renameVariable(self, var: Variable, name: str = None):
+    def renameVariable(self, var: Variable, name: str = None, verbose: bool = False):
         name = name if name is not None else randomName(DEFAULT_NAME_LENGTH)
         var.newName = name
 
         replaceIdentifier(var.name, var.newName, self.codeLines[1:-1])
 
-    def renameParameter(self, param: Parameter, name: str = None):
+    def renameParameter(self, param: Parameter, name: str = None, verbose: bool = False):
         name = name if name is not None else randomName(DEFAULT_NAME_LENGTH)
         param.var.newName = name
 
         replaceIdentifier(param.var.name, param.var.newName, self.codeLines[1:-1])
 
 
-def replaceIdentifier(oldName: str, newName: str, lines: List[CodeLine]):
+def replaceIdentifier(oldName: str, newName: str, lines: List[CodeLine], verbose: bool = False):
     pattern = RE_IDENTIFIER_USE.replace("%NAME%", oldName)
     for codeLine in lines:
         newline, subs = re.subn(pattern,
                                 RE_IDENTIFIER_SUB.replace("%NAME%", newName),
                                 codeLine.exportLine)
         if subs > 0:
-            print(f'[{codeLine.number}] Reference to identifier "{oldName}" changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
+            if verbose:
+                print(f'[{codeLine.number}] Reference to identifier "{oldName}" changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
             codeLine.exportLine = newline
 
 
@@ -171,22 +296,22 @@ def replaceIdentifier(oldName: str, newName: str, lines: List[CodeLine]):
 class File:
     def __init__(self):
         self.methods: List[Method] = []
-        self.lines: List[CodeLine] = []
+        self.originalLines: List[CodeLine] = []
 
-    def renameMethod(self, meth: Method, name: str = None):
+    def renameMethod(self, meth: Method, name: str = None, verbose: bool = False):
         name = name if name is not None else randomName(DEFAULT_NAME_LENGTH)
         meth.exportName = name
 
         # Find method calls
         pattern = RE_METHOD_CALLS.replace("%NAME%", meth.name)
-        # r"\s+" + meth.name + r"\("  # 'method('
         for m in self.methods:
             for i, codeLine in enumerate(m.codeLines[1:-1]):
                 newline, subs = re.subn(pattern,
                                         RE_METHOD_CALLS_SUB.replace("%NAME%", name),
                                         codeLine.exportLine)
                 if subs > 0:
-                    print(f'Call to {meth.name} in method {m.name}, changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
+                    if verbose:
+                        print(f'Call to {meth.name} in method {m.name}, changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
                     codeLine.exportLine = newline
         # Find references
         pattern = RE_METHOD_REF.replace("%NAME%", meth.name)
@@ -196,17 +321,15 @@ class File:
                                         RE_METHOD_REF_SUB.replace("%NAME%", name),
                                         codeLine.exportLine)
                 if subs > 0:
-                    print(f'Reference to {meth.name} in method {m.name}, changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
+                    if verbose:
+                        print(f'Reference to {meth.name} in method {m.name}, changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
                     codeLine.exportLine = newline
 
     def dump(self) -> Iterator[str]:
-        return self.lines
-        # for m in self.methods:
-        #     yield m.signature
-        #     for codeLine in m.codeLines[1:]:
-        #         yield codeLine.exportLine
-        #     yield ""
-        #     yield ""
+        line = self.originalLines[0]
+        while line:
+            yield line
+            line = line.next
 
 
 def parseParameters(params: str) -> List[Parameter]:
@@ -266,10 +389,11 @@ class ParserArguments:
     verbose: bool = True
 
 
-def parse(lines: List[str], parserArgs: ParserArguments = None) -> File:
+def parse(lines: Iterable[str], parserArgs: ParserArguments = None) -> File:
     parserArgs = parserArgs if parserArgs is not None else ParserArguments()
     meth: Method = None
     file: File = File()
+    last: CodeLine = None
 
     for i, line in enumerate(lines):
         if parserArgs.stripComments:
@@ -277,10 +401,13 @@ def parse(lines: List[str], parserArgs: ParserArguments = None) -> File:
         line = line.rstrip()
 
         codeLine = CodeLine(line=line, number=(i+1))
-        file.lines.append(codeLine)
 
         if parserArgs.skipEmptyLines and len(line.strip()) == 0:
             continue
+
+        codeLine.prev = last
+        last = codeLine
+        file.originalLines.append(codeLine)
 
         # Method definition?
         match = re.match(RE_METHODS, codeLine.line)
@@ -288,7 +415,9 @@ def parse(lines: List[str], parserArgs: ParserArguments = None) -> File:
             if meth:
                 raise Exception("Defined method before terminating method")
 
+            codeLine.lineType = CodeLineType.MethodStart
             meth = Method(
+                file=file,
                 name=match.group("name"),
                 type=match.group("type"),
                 returnType=match.group("return"),
@@ -300,7 +429,7 @@ def parse(lines: List[str], parserArgs: ParserArguments = None) -> File:
                 meth.parameters = parseParameters(params)
 
             file.methods.append(meth)
-            meth.codeLines.append(codeLine)
+            # meth.codeLines.append(codeLine)
             codeLine.method = meth
             continue
 
@@ -309,7 +438,9 @@ def parse(lines: List[str], parserArgs: ParserArguments = None) -> File:
         if match:
             if not meth:
                 raise Exception("Terminated method before defining method")
-            meth.codeLines.append(codeLine)
+
+            codeLine.lineType = CodeLineType.MethodEnd
+            codeLine.method = meth
             meth = None
             continue
 
@@ -317,13 +448,11 @@ def parse(lines: List[str], parserArgs: ParserArguments = None) -> File:
         match = re.match(RE_DECLARATIONS, line)
         if match:
             if meth:
-                meth.codeLines.append(codeLine)
                 meth.variables.extend(parseVariables(match.group("vars")))
                 codeLine.method = meth
             continue
 
         if meth:
-            meth.codeLines.append(codeLine)
             codeLine.method = meth
 
         if parserArgs.verbose:

@@ -9,7 +9,15 @@
             "type": "python",
             "request": "launch",
             "program": "__init__.py",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "args": [
+                ".\\sample.vb",
+                "-v",
+                "-sel",
+                "-sc",
+                "-im",
+                "\"XorEncrypt\""
+            ]
         }
     ]
 }
