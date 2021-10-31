@@ -1,19 +1,25 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import enum
 import re
 from typing import Iterator, List
 import random
 import string
 
-RE_DECLARATIONS = r"^\s*Dim\s+(?P<vars>.*)$"
-RE_VARIABLES = r"(?P<name>[\w\d]+)(\sAs\s(?P<type>[\w\d]+(\s+\*\s+\d+)?))?"
-RE_FUNCTIONS = r"(^(?P<mod>Private|Public)\s+)?(?P<type>Function|Sub)\s+(?P<name>.*)\((?P<params>(.*)?)\)(\s+As\s+(?P<return>.+))?"
-RE_PARAMETERS = r"((?P<tname>\S+) As (?P<type>\w+))|(ByVal (?P<bvname>\S+))|(ByRef (?P<brname>\S+))|((?P<name>[\w\d]+))"
-RE_END_FUNC = r"End (Function|Sub)"
+RE_DECLARATIONS = r"^\s*Dim\s+(?P<vars>.*)$"  # 'Dim ...'
+RE_VARIABLES = r"(?P<name>[\w\d]+)(\sAs\s(?P<type>[\w\d]+(\s+\*\s+\d+)?))?"  # 'var [As String]'
+RE_METHODS = r"(^(?P<mod>Private|Public)\s+)?(?P<type>Function|Sub)\s+(?P<name>.*)\((?P<params>(.*)?)\)(\s+As\s+(?P<return>.+))?"  # '[Private] Function func([params]) [As String]
+RE_METHOD_CALLS = r"(?P<pre>(^\s*|\s+))%NAME%\("  # 'method('
+RE_METHOD_CALLS_SUB = r"\g<pre>%NAME%("
+RE_METHOD_REF = r"^(?P<pre>\s*)%NAME%(?P<post>\s+.*)$"  # 'method [= ...|args]'
+RE_METHOD_REF_SUB = r"\g<pre>%NAME%\g<post>"
+RE_PARAMETERS = r"((?P<tname>\S+) As (?P<type>\w+))|(ByVal (?P<bvname>\S+))|(ByRef (?P<brname>\S+))|((?P<name>[\w\d]+))"  # 'var As String'
+RE_END_FUNC = r"End (Function|Sub)"  # 'End Function
 RE_COMMENT = r"'(.*)"
+RE_IDENTIFIER_USE = r"(?P<pre>[\W\D])%NAME%(?P<post>[\W\D])?"  # Matches %NAME% when there's no [a-zA-Z0-9] prepended or appended (=> exact identifier only), but allows ',' or '(' etc
+RE_IDENTIFIER_SUB = r"\g<pre>%NAME%\g<post>"
 
 NAMES = set()
-DEFAULT_NAME_LENGTH = 2
+DEFAULT_NAME_LENGTH = 8
 
 
 def randomName(length=DEFAULT_NAME_LENGTH, alphabet: str = string.ascii_letters):
@@ -23,6 +29,25 @@ def randomName(length=DEFAULT_NAME_LENGTH, alphabet: str = string.ascii_letters)
             continue
         NAMES.add(name)
         return name
+
+
+@dataclass
+class CodeLine:
+    line: str
+    newLine: str
+    number: int
+
+    @property
+    def exportLine(self) -> str:
+        return self.newLine if self.newLine else self.line
+
+    @exportLine.setter
+    def exportLine(self, newLine: str):
+        self.newLine = newLine
+
+    @property
+    def isEmpty(self) -> str:
+        return len(self.exportLine.strip()) == 0
 
 
 @dataclass
@@ -76,11 +101,16 @@ class Method:
     newName: str
     parameters: List[Variable]
     variables: List[Variable]
-    lines: List[str]
+    codeLines: List[CodeLine]
 
     @property
     def exportName(self) -> str:
         return self.newName if self.newName else self.name
+
+    @exportName.setter
+    def exportName(self, newName):
+        self.newName = newName
+        self.codeLines[0].exportLine = self.signature
 
     @property
     def signature(self) -> str:
@@ -95,59 +125,65 @@ class Method:
         name = name if name is not None else randomName(DEFAULT_NAME_LENGTH)
         var.newName = name
 
-        # Find variable uses
-        pattern = r"(?P<pre>[\W\D])" + var.name + r"(?P<post>[\W\D])?"
-        for i, line in enumerate(self.lines[1:-1]):
-            newline, subs = re.subn(pattern, r"\g<pre>" + name + r"\g<post>", line)
-            if subs > 0:
-                print(f'Use of variable "{var.name}", changed from "{line.strip()}" to "{newline.strip()}"')
-                self.lines[i+1] = newline
+        replaceIdentifier(var.name, var.newName, self.codeLines[1:-1])
 
     def renameParameter(self, param: Parameter, name: str = None):
         name = name if name is not None else randomName(DEFAULT_NAME_LENGTH)
         param.var.newName = name
 
-        # Find parameter uses
-        pattern = r"(?P<pre>[\W\D])" + param.var.name + r"(?P<post>[\W\D])?"
-        for i, line in enumerate(self.lines[1:-1]):
-            newline, subs = re.subn(pattern, r"\g<pre>" + name + r"\g<post>", line)
-            if subs > 0:
-                print(f'Use of parameter "{param.var.name}", changed from "{line.strip()}" to "{newline.strip()}"')
-                self.lines[i+1] = newline
+        replaceIdentifier(param.var.name, param.var.newName, self.codeLines[1:-1])
+
+
+def replaceIdentifier(oldName: str, newName: str, lines: List[CodeLine]):
+    pattern = RE_IDENTIFIER_USE.replace("%NAME%", oldName)
+    for codeLine in lines:
+        newline, subs = re.subn(pattern,
+                                RE_IDENTIFIER_SUB.replace("%NAME%", newName),
+                                codeLine.exportLine)
+        if subs > 0:
+            print(f'[{codeLine.number}] Reference to identifier "{oldName}" changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
+            codeLine.exportLine = newline
 
 
 @dataclass
 class File:
     methods: List[Method]
+    lines: List[CodeLine]
 
     def renameMethod(self, meth: Method, name: str = None):
         name = name if name is not None else randomName(DEFAULT_NAME_LENGTH)
-        meth.newName = name
+        meth.exportName = name
 
         # Find method calls
-        pattern = r"\s+" + meth.name + r"\("  # 'method('
+        pattern = RE_METHOD_CALLS.replace("%NAME%", meth.name)
+        # r"\s+" + meth.name + r"\("  # 'method('
         for m in self.methods:
-            for i, line in enumerate(m.lines[1:-1]):
-                newline, subs = re.subn(pattern, name + "(", line)
+            for i, codeLine in enumerate(m.codeLines[1:-1]):
+                newline, subs = re.subn(pattern,
+                                        RE_METHOD_CALLS_SUB.replace("%NAME%", name),
+                                        codeLine.exportLine)
                 if subs > 0:
-                    print(f'Call to {meth.name} in method {m.name}, changed from "{line.strip()}" to "{newline.strip()}"')
-                    m.lines[i+1] = newline
+                    print(f'Call to {meth.name} in method {m.name}, changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
+                    codeLine.exportLine = newline
         # Find references
-        pattern = r"^(?P<indent>\s*)(?P<name>" + meth.name + r")(?P<epilogue>\s+.*)$"  # 'method [= ...|args]
+        pattern = RE_METHOD_REF.replace("%NAME%", meth.name)
         for m in self.methods:
-            for i, line in enumerate(m.lines[1:-1]):
-                newline, subs = re.subn(pattern, r"\g<indent>" + name + r"\g<epilogue>", line)
+            for i, codeLine in enumerate(m.codeLines[1:-1]):
+                newline, subs = re.subn(pattern,
+                                        RE_METHOD_REF_SUB.replace("%NAME%", name),
+                                        codeLine.exportLine)
                 if subs > 0:
-                    print(f'Reference to {meth.name} in method {m.name}, changed from "{line.strip()}" to "{newline.strip()}"')
-                    m.lines[i+1] = newline
+                    print(f'Reference to {meth.name} in method {m.name}, changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
+                    codeLine.exportLine = newline
 
     def dump(self) -> Iterator[str]:
-        for m in self.methods:
-            yield m.signature
-            for line in m.lines[1:]:
-                yield line
-            yield ""
-            yield ""
+        return self.lines
+        # for m in self.methods:
+        #     yield m.signature
+        #     for codeLine in m.codeLines[1:]:
+        #         yield codeLine.exportLine
+        #     yield ""
+        #     yield ""
 
 
 def parseParameters(params: str) -> List[Parameter]:
@@ -206,16 +242,18 @@ def parseVariables(variables: str) -> List[Variable]:
 
 def parse(lines: List[str]) -> File:
     meth: Method = None
-    file: File = File([])
+    file: File = File(methods=[], lines=[])
 
     for i, line in enumerate(lines):
         # Strip comments
         line = re.sub(RE_COMMENT, "", line).rstrip()
-        #if len(line.strip()) == 0:
+        codeLine = CodeLine(line=line, newLine=None, number=(i+1))
+        file.lines.append(codeLine)
+        # if len(line.strip()) == 0:
         #    continue
 
         # Method definition?
-        match = re.match(RE_FUNCTIONS, line)
+        match = re.match(RE_METHODS, codeLine.line)
         if match:
             if meth:
                 raise Exception("Defined method before terminating method")
@@ -228,7 +266,7 @@ def parse(lines: List[str]) -> File:
                 modifier=match.group("mod"),
                 parameters=[],
                 variables=[],
-                lines=[])
+                codeLines=[])
 
             # Parse parameters (if any)
             params = match.group("params")
@@ -236,7 +274,7 @@ def parse(lines: List[str]) -> File:
                 meth.parameters = parseParameters(params)
 
             file.methods.append(meth)
-            meth.lines.append(line)
+            meth.codeLines.append(codeLine)
             continue
 
         # Method termination?
@@ -244,19 +282,19 @@ def parse(lines: List[str]) -> File:
         if match:
             if not meth:
                 raise Exception("Terminated method before defining method")
-            meth.lines.append(line)
+            meth.codeLines.append(codeLine)
             meth = None
             continue
 
         # Variable declaration?
         match = re.match(RE_DECLARATIONS, line)
         if match:
-            meth.lines.append(line)
+            meth.codeLines.append(codeLine)
             meth.variables.extend(parseVariables(match.group("vars")))
             continue
 
         if meth:
-            meth.lines.append(line)
+            meth.codeLines.append(codeLine)
         print(f'[{(i+1)}] Unmatched line: "{line}"')
 
     return file

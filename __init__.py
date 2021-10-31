@@ -11,6 +11,6 @@ for m in file.methods:
         m.renameParameter(p)
 
 with open("sample_obf.vba", "w") as outp:
-    outp.writelines(map(lambda l: l + "\n", file.dump()))
+    outp.writelines(map(lambda l: l.exportLine + "\n", file.dump()))
 
 print(file)
