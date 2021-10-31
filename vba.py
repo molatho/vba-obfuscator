@@ -17,6 +17,7 @@ RE_END_FUNC = r"End (Function|Sub)"  # 'End Function
 RE_COMMENT = r"'(.*)"
 RE_IDENTIFIER_USE = r"(?P<pre>[\W\D])%NAME%(?P<post>[\W\D])?"  # Matches %NAME% when there's no [a-zA-Z0-9] prepended or appended (=> exact identifier only), but allows ',' or '(' etc
 RE_IDENTIFIER_SUB = r"\g<pre>%NAME%\g<post>"
+RE_STRINGS = r"\"[^\"]*\""  # Matches everything between two double-quotes
 
 NAMES = set()
 DEFAULT_NAME_LENGTH = 8
@@ -32,29 +33,51 @@ def randomName(length=DEFAULT_NAME_LENGTH, alphabet: str = string.ascii_letters)
 
 
 @dataclass
+class String:
+    value: str
+    startIdx: int
+    endIdx: int
+    codeLine: 'CodeLine'
+
+
 class CodeLine:
-    line: str
-    newLine: str
-    number: int
+    def __init__(self, line: str, number: int):
+        self.line: str = line
+        self.number: int = number
+        self.method: Method = None
+        self._newLine: str = None
+        self.strings: List[String] = self.getStrings()
+
+    def getStrings(self) -> List[String]:
+        return [
+            String(value=match.string[match.start():match.end()],
+                   startIdx=match.start(),
+                   endIdx=match.end(),
+                   codeLine=self)
+            for match in re.finditer(RE_STRINGS, self.line)
+        ]
 
     @property
     def exportLine(self) -> str:
-        return self.newLine if self.newLine else self.line
+        return self._newLine if self._newLine else self.line
 
     @exportLine.setter
     def exportLine(self, newLine: str):
-        self.newLine = newLine
+        self._newLine = newLine
 
     @property
     def isEmpty(self) -> str:
         return len(self.exportLine.strip()) == 0
 
+    def __repr__(self) -> str:
+        return self.exportLine
+
 
 @dataclass
 class Variable:
     name: str
-    newName: str
-    type: str
+    type: str = None
+    newName: str = None
 
     @property
     def declaration(self) -> str:
@@ -92,16 +115,15 @@ class Parameter:
             raise Exception("Invalid parameter declaration")
 
 
-@dataclass
 class Method:
-    returnType: str
-    modifier: str
-    name: str
-    type: str
-    newName: str
-    parameters: List[Variable]
-    variables: List[Variable]
-    codeLines: List[CodeLine]
+    def __init__(self, returnType: str, modifier: str, name: str, type: str):
+        self.returnType: str = returnType
+        self.modifier: str = modifier
+        self.name: str = name
+        self.type: str = type
+        self.parameters: List[Variable] = []
+        self.variables: List[Variable] = []
+        self.codeLines: List[CodeLine] = []
 
     @property
     def exportName(self) -> str:
@@ -147,8 +169,9 @@ def replaceIdentifier(oldName: str, newName: str, lines: List[CodeLine]):
 
 @dataclass
 class File:
-    methods: List[Method]
-    lines: List[CodeLine]
+    def __init__(self):
+        self.methods: List[Method] = []
+        self.lines: List[CodeLine] = []
 
     def renameMethod(self, meth: Method, name: str = None):
         name = name if name is not None else randomName(DEFAULT_NAME_LENGTH)
@@ -192,29 +215,22 @@ def parseParameters(params: str) -> List[Parameter]:
         if param.group("tname"):
             parameters.append(Parameter(
                 var=Variable(name=param.group("tname"),
-                             type=param.group("type"),
-                             newName=None),
+                             type=param.group("type")),
                 ptype=ParameterType.Typed
             ))
         elif param.group("bvname"):
             parameters.append(Parameter(
-                var=Variable(name=param.group("bvname"),
-                             type=None,
-                             newName=None),
+                var=Variable(name=param.group("bvname")),
                 ptype=ParameterType.ByVal
             ))
         elif param.group("brname"):
             parameters.append(Parameter(
-                var=Variable(name=param.group("brname"),
-                             type=None,
-                             newName=None),
+                var=Variable(name=param.group("brname")),
                 ptype=ParameterType.ByRef
             ))
         elif param.group("name"):
             parameters.append(Parameter(
-                var=Variable(name=param.group("name"),
-                             type=None,
-                             newName=None),
+                var=Variable(name=param.group("name")),
                 ptype=ParameterType.Plain
             ))
         else:
@@ -226,10 +242,13 @@ def parseParameters(params: str) -> List[Parameter]:
 def parseVariables(variables: str) -> List[Variable]:
     vars = [
         Variable(name=var.group("name"),
-                 type=var.group("type"),
-                 newName=None)
+                 type=var.group("type"))
         for var in re.finditer(RE_VARIABLES, variables)
     ]
+    # Sanity-check:
+    # If we found more than one variable in the search string, make sure they are of the same type.
+    # If there are multiple types, that's invalid syntax (last variable dictates type for all).
+    # If there is one type annotation, apply this to all variables.
     types = {var.type for var in vars if var.type != None}
     if len(types) > 1:
         raise Exception(f'Found {len(types)} ({types}) in "{variables}"')
@@ -240,17 +259,28 @@ def parseVariables(variables: str) -> List[Variable]:
     return vars
 
 
-def parse(lines: List[str]) -> File:
+@dataclass
+class ParserArguments:
+    skipEmptyLines: bool = True
+    stripComments: bool = True
+    verbose: bool = True
+
+
+def parse(lines: List[str], parserArgs: ParserArguments = None) -> File:
+    parserArgs = parserArgs if parserArgs is not None else ParserArguments()
     meth: Method = None
-    file: File = File(methods=[], lines=[])
+    file: File = File()
 
     for i, line in enumerate(lines):
-        # Strip comments
-        line = re.sub(RE_COMMENT, "", line).rstrip()
-        codeLine = CodeLine(line=line, newLine=None, number=(i+1))
+        if parserArgs.stripComments:
+            line = re.sub(RE_COMMENT, "", line)
+        line = line.rstrip()
+
+        codeLine = CodeLine(line=line, number=(i+1))
         file.lines.append(codeLine)
-        # if len(line.strip()) == 0:
-        #    continue
+
+        if parserArgs.skipEmptyLines and len(line.strip()) == 0:
+            continue
 
         # Method definition?
         match = re.match(RE_METHODS, codeLine.line)
@@ -261,12 +291,8 @@ def parse(lines: List[str]) -> File:
             meth = Method(
                 name=match.group("name"),
                 type=match.group("type"),
-                newName=None,
                 returnType=match.group("return"),
-                modifier=match.group("mod"),
-                parameters=[],
-                variables=[],
-                codeLines=[])
+                modifier=match.group("mod"))
 
             # Parse parameters (if any)
             params = match.group("params")
@@ -275,6 +301,7 @@ def parse(lines: List[str]) -> File:
 
             file.methods.append(meth)
             meth.codeLines.append(codeLine)
+            codeLine.method = meth
             continue
 
         # Method termination?
@@ -289,12 +316,17 @@ def parse(lines: List[str]) -> File:
         # Variable declaration?
         match = re.match(RE_DECLARATIONS, line)
         if match:
-            meth.codeLines.append(codeLine)
-            meth.variables.extend(parseVariables(match.group("vars")))
+            if meth:
+                meth.codeLines.append(codeLine)
+                meth.variables.extend(parseVariables(match.group("vars")))
+                codeLine.method = meth
             continue
 
         if meth:
             meth.codeLines.append(codeLine)
-        print(f'[{(i+1)}] Unmatched line: "{line}"')
+            codeLine.method = meth
+
+        if parserArgs.verbose:
+            print(f'[{(i+1)}] Unmatched line: "{line}"')
 
     return file

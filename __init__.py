@@ -1,7 +1,11 @@
 import vba
 
 with open("sample.vb", "r") as sample:
-    file = vba.parse(sample.readlines())
+    file = vba.parse(sample.readlines(), vba.ParserArguments(
+        skipEmptyLines=False,
+        stripComments=False,
+        verbose=True
+    ))
 
 for m in file.methods:
     file.renameMethod(m)
@@ -13,4 +17,4 @@ for m in file.methods:
 with open("sample_obf.vba", "w") as outp:
     outp.writelines(map(lambda l: l.exportLine + "\n", file.dump()))
 
-print(file)
+pass
