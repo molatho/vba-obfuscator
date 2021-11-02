@@ -9,12 +9,12 @@ class StringMutator(ABC):
 
 class StringSplitter(StringMutator):
     def process(st: String):
-        # st.tags.add(StringSplitter)
+        # st.tags.add(StringSplitter) # TODO: Strip tags?
         if len(st.value) > 8:
             val = st.value[1:-1]  # Strip quotes
             newStrings = ' & '.join([
                 f'"{chunk}"'
-                for chunk in StringSplitter.chunkstring(val, 8)
+                for chunk in StringSplitter.chunkstring(val, 8)  # TODO: Make this customizable
             ])
             st.codeLine.replaceString(st, newStrings)
 

@@ -97,7 +97,7 @@ class CodeLine:
                    startIdx=match.start(),
                    endIdx=match.end(),
                    codeLine=self)
-            for match in re.finditer(RE_STRINGS, self.line)
+            for match in re.finditer(RE_STRINGS, self.exportLine)
         ]
         return self.strings
 

@@ -22,7 +22,8 @@
                 "-rv",
                 "-rp",
                 "-strmut",
-                "split"
+                "split",
+                "xor"
             ]
         }
     ]

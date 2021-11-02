@@ -1,4 +1,5 @@
 import argparse
+from custom.xorstr import XorStringMutator
 import os
 import string
 import sys
@@ -9,6 +10,7 @@ import vba
 
 STRING_MUTATORS = {
     'split': StringSplitter,
+    'xor': XorStringMutator
     # Add your custom string mutator here!
 }
 
@@ -80,8 +82,11 @@ def createParser():
                         help=f'Alphabet to use for generated parameter names (default: {string.ascii_letters})')
     parser.add_argument("-strmut",
                         type=str,
+                        nargs='*',
+                        default=[],
                         choices=list(STRING_MUTATORS.keys()),
-                        help="String mutator to apply to all strings")
+                        help="List of string mutator to apply to all strings",
+                        action="extend")
     parser.add_argument("-v",
                         action='store_true',
                         default=False,
@@ -111,12 +116,13 @@ def main(args: List[str]):
         if m.name in args.imethods:
             continue
         if args.strmut:
-            mut = STRING_MUTATORS.get(args.strmut, None)
-            if mut is None:
-                raise Exception(f'Invalid string mutator "{args.strmut}"')
-            for c in m.codeLinesIter:
-                for s in c.parseStrings():
-                    mut.process(s)
+            for mutname in args.strmut:
+                mut = STRING_MUTATORS.get(mutname, None)
+                if mut is None:
+                    raise Exception(f'Invalid string mutator "{args.strmut}"')
+                for c in m.codeLinesIter:
+                    for s in c.parseStrings():
+                        mut.process(s)
         if args.rall or args.rm:  # Rename methods
             file.renameMethod(m, name=vba.randomName(rml, rma), verbose=args.v)
         if args.rall or args.rp:  # Rename parameters
