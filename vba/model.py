@@ -1,43 +1,9 @@
-from dataclasses import dataclass, replace
-import enum
+from dataclasses import dataclass
+from enum import Enum
 import re
-from typing import Dict, Iterable, Iterator, List, Set, Tuple
-import random
-import string
-
-RE_DECLARATIONS = r"^\s*Dim\s+(?P<vars>.*)$"  # 'Dim ...'
-RE_VARIABLES = r"(?P<name>[\w\d]+)(\sAs\s(?P<type>[\w\d]+(\s+\*\s+\d+)?))?"  # 'var [As String]'
-RE_METHODS = r"(^(?P<mod>Private|Public)\s+)?(?P<type>Function|Sub)\s+(?P<name>.*)\((?P<params>(.*)?)\)(\s+As\s+(?P<return>.+))?"  # '[Private] Function func([params]) [As String]
-RE_METHOD_CALLS = r"(?P<pre>(^\s*|\s+))%NAME%\("  # 'method('
-RE_METHOD_CALLS_SUB = r"\g<pre>%NAME%("
-RE_METHOD_REF = r"^(?P<pre>\s*)%NAME%(?P<post>\s+.*)$"  # 'method [= ...|args]'
-RE_METHOD_REF_SUB = r"\g<pre>%NAME%\g<post>"
-RE_PARAMETERS = r"((?P<tname>\S+) As (?P<type>\w+))|(ByVal (?P<bvname>\S+))|(ByRef (?P<brname>\S+))|((?P<name>[\w\d]+))"  # 'var As String'
-RE_END_FUNC = r"End (Function|Sub)"  # 'End Function
-RE_COMMENT = r"'(.*)"
-RE_IDENTIFIER_USE = r"(?P<pre>[\W\D])%NAME%(?P<post>[\W\D])?"  # Matches %NAME% when there's no [a-zA-Z0-9] prepended or appended (=> exact identifier only), but allows ',' or '(' etc
-RE_IDENTIFIER_SUB = r"\g<pre>%NAME%\g<post>"
-RE_STRINGS = r"\"[^\"]*\""  # Matches everything between two double-quotes
-
-NAMES: Dict[Tuple[int, str], Set[str]] = {}  # Saves all generated names per length/alphabet combination
-DEFAULT_NAME_LENGTH = 8  # TODO: Remove
-
-
-def randomName(length=DEFAULT_NAME_LENGTH, alphabet: str = string.ascii_letters):
-    names = NAMES.get((length, alphabet), None)
-    if names is None:
-        names = NAMES[(length, alphabet)] = set()
-
-    MAX = pow(len(alphabet), length)
-    if len(names) >= MAX:
-        raise Exception(f'Exceeded maximum of {MAX} random names with {length} elements of alphabet "{alphabet}"')
-
-    while True:
-        name = ''.join(random.choices(alphabet, k=length))
-        if name in NAMES:
-            continue
-        names.add(name)
-        return name
+from typing import Iterator, List, Set
+from vba.rng import DEFAULT_NAME_LENGTH, randomName
+from vba.regex import RE_IDENTIFIER_SUB, RE_IDENTIFIER_USE, RE_METHOD_CALLS, RE_METHOD_CALLS_SUB, RE_METHOD_REF, RE_METHOD_REF_SUB, RE_STRINGS
 
 
 @dataclass
@@ -47,6 +13,7 @@ class String:
     endIdx: int
     codeLine: 'CodeLine'
     newString: str = None
+    tags: Set = None
 
     @property
     def exportString(self) -> str:
@@ -57,7 +24,7 @@ class String:
         self.newString = newString
 
 
-class CodeLineType(enum.Enum):
+class CodeLineType(Enum):
     Default = 0,
     MethodStart = 1,
     MethodEnd = 2
@@ -72,7 +39,7 @@ class CodeLine:
         self._newLine: str = None
         self._prev: CodeLine = None
         self._next: CodeLine = None
-        self.strings: List[String] = self.getStrings()
+        self.parseStrings()
 
     @property
     def next(self) -> 'CodeLine':
@@ -101,11 +68,11 @@ class CodeLine:
 
     @property
     def first(self) -> 'CodeLine':
-        return self if self.isFirst else self._prev
+        return self if self.isFirst else self._prev.first
 
     @property
     def last(self) -> 'CodeLine':
-        return self if self.isLast else self._next
+        return self if self.isLast else self._next.last
 
     @property
     def prev(self) -> 'CodeLine':
@@ -124,14 +91,15 @@ class CodeLine:
         if prev is not None:
             prev.next = self
 
-    def getStrings(self) -> List[String]:
-        return [
+    def parseStrings(self) -> List[String]:
+        self.strings = [
             String(value=match.string[match.start():match.end()],
                    startIdx=match.start(),
                    endIdx=match.end(),
                    codeLine=self)
             for match in re.finditer(RE_STRINGS, self.line)
         ]
+        return self.strings
 
     @property
     def exportLine(self) -> str:
@@ -222,7 +190,7 @@ class Variable:
         return self.newName if self.newName else self.name
 
 
-class ParameterType(enum.Enum):
+class ParameterType(Enum):
     Plain = 0,
     Typed = 1,
     ByRef = 2,
@@ -252,13 +220,19 @@ class Method:
         self.modifier: str = modifier
         self.name: str = name
         self.type: str = type
-        self._file: 'File' = file
+        self.file: 'File' = file
+        self.newName: str = None
         self.parameters: List[Variable] = []
         self.variables: List[Variable] = []
 
     @property
     def codeLinesIter(self) -> Iterator[CodeLine]:
-        return (line for line in self._file.originalLines if line.method is self)
+        cl = self.file.originalLines[0]
+        while cl is not None:
+            if cl.method == self:
+                yield cl
+            cl = cl.next
+        # return (line for line in self.file.originalLines if line.method is self)
 
     @property
     def codeLines(self) -> List[CodeLine]:
@@ -352,137 +326,20 @@ class File:
                         print(f'Reference to {meth.name} in method {m.name}, changed from "{codeLine.exportLine.strip()}" to "{newline.strip()}"')
                     codeLine.exportLine = newline
 
+    def createMethod(self, name: str, type: str, returnType: str = None, modifier: str = None) -> Method:
+        meth = Method(self, returnType, modifier, name, type)
+        pro = CodeLine(meth.signature, method=meth, lineType=CodeLineType.MethodStart)
+        epi = CodeLine(f"End {type}", method=meth, lineType=CodeLineType.MethodEnd)
+        pro.next = epi
+        self.originalLines[0].last.next = pro
+        self.methods.append(meth)
+        return meth
+
+    def hasMethod(self, name: str) -> bool:
+        return next(filter(lambda m: m.name == name, self.methods), None) is not None
+
     def dump(self) -> Iterator[str]:
         line = self.originalLines[0]
         while line:
             yield line
             line = line.next
-
-
-def parseParameters(params: str) -> List[Parameter]:
-    parameters = []
-    for param in re.finditer(RE_PARAMETERS, params):
-        if param.group("tname"):
-            parameters.append(Parameter(
-                var=Variable(name=param.group("tname"),
-                             type=param.group("type")),
-                ptype=ParameterType.Typed
-            ))
-        elif param.group("bvname"):
-            parameters.append(Parameter(
-                var=Variable(name=param.group("bvname")),
-                ptype=ParameterType.ByVal
-            ))
-        elif param.group("brname"):
-            parameters.append(Parameter(
-                var=Variable(name=param.group("brname")),
-                ptype=ParameterType.ByRef
-            ))
-        elif param.group("name"):
-            parameters.append(Parameter(
-                var=Variable(name=param.group("name")),
-                ptype=ParameterType.Plain
-            ))
-        else:
-            raise Exception(f'Failed to parse parameter "{param.string}"')
-
-    return parameters
-
-
-def parseVariables(variables: str) -> List[Variable]:
-    vars = [
-        Variable(name=var.group("name"),
-                 type=var.group("type"))
-        for var in re.finditer(RE_VARIABLES, variables)
-    ]
-    # Sanity-check:
-    # If we found more than one variable in the search string, make sure they are of the same type.
-    # If there are multiple types, that's invalid syntax (last variable dictates type for all).
-    # If there is one type annotation, apply this to all variables.
-    types = {var.type for var in vars if var.type != None}
-    if len(types) > 1:
-        raise Exception(f'Found {len(types)} ({types}) in "{variables}"')
-    if len(types) == 1 and len(vars) > 1:
-        targetType = types.pop()
-        for var in vars:
-            var.type = targetType
-    return vars
-
-
-@dataclass
-class ParserArguments:
-    skipEmptyLines: bool = True
-    stripComments: bool = True
-    verbose: bool = True
-
-
-def parse(lines: Iterable[str], parserArgs: ParserArguments = None) -> File:
-    parserArgs = parserArgs if parserArgs is not None else ParserArguments()
-    meth: Method = None
-    file: File = File()
-    last: CodeLine = None
-
-    for i, line in enumerate(lines):
-        if parserArgs.stripComments:
-            line = re.sub(RE_COMMENT, "", line)
-        line = line.rstrip()
-
-        codeLine = CodeLine(line=line, number=(i+1))
-
-        if parserArgs.skipEmptyLines and len(line.strip()) == 0:
-            continue
-
-        codeLine.prev = last
-        last = codeLine
-        file.originalLines.append(codeLine)
-
-        # Method definition?
-        match = re.match(RE_METHODS, codeLine.line)
-        if match:
-            if meth:
-                raise Exception("Defined method before terminating method")
-
-            codeLine.lineType = CodeLineType.MethodStart
-            meth = Method(
-                file=file,
-                name=match.group("name"),
-                type=match.group("type"),
-                returnType=match.group("return"),
-                modifier=match.group("mod"))
-
-            # Parse parameters (if any)
-            params = match.group("params")
-            if params:
-                meth.parameters = parseParameters(params)
-
-            file.methods.append(meth)
-            # meth.codeLines.append(codeLine)
-            codeLine.method = meth
-            continue
-
-        # Method termination?
-        match = re.match(RE_END_FUNC, line)
-        if match:
-            if not meth:
-                raise Exception("Terminated method before defining method")
-
-            codeLine.lineType = CodeLineType.MethodEnd
-            codeLine.method = meth
-            meth = None
-            continue
-
-        # Variable declaration?
-        match = re.match(RE_DECLARATIONS, line)
-        if match:
-            if meth:
-                meth.variables.extend(parseVariables(match.group("vars")))
-                codeLine.method = meth
-            continue
-
-        if meth:
-            codeLine.method = meth
-
-        if parserArgs.verbose:
-            print(f'[{(i+1)}] Unmatched line: "{line}"')
-
-    return file

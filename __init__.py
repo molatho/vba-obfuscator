@@ -3,8 +3,14 @@ import os
 import string
 import sys
 from typing import List
+from vba.mutators.strings import StringSplitter
 
 import vba
+
+STRING_MUTATORS = {
+    'split': StringSplitter,
+    # Add your custom string mutator here!
+}
 
 
 def createParser():
@@ -30,6 +36,10 @@ def createParser():
                         action='store_true',
                         default=False,
                         help="Strip comments from code")
+    parser.add_argument("-rall",
+                        action='store_true',
+                        default=False,
+                        help="Rename all identifiers (methods, variables, parameters)")
     parser.add_argument("-rm",
                         action='store_true',
                         default=False,
@@ -68,6 +78,10 @@ def createParser():
     parser.add_argument("-rpa",
                         type=str,
                         help=f'Alphabet to use for generated parameter names (default: {string.ascii_letters})')
+    parser.add_argument("-strmut",
+                        type=str,
+                        choices=list(STRING_MUTATORS.keys()),
+                        help="String mutator to apply to all strings")
     parser.add_argument("-v",
                         action='store_true',
                         default=False,
@@ -80,7 +94,7 @@ def main(args: List[str]):
     args = parser.parse_args(args)
 
     with open(args.input, "r") as input:
-        file = vba.parse(input, vba.ParserArguments(
+        file = vba.parsing.parse(input, vba.parsing.ParserArguments(
             skipEmptyLines=args.sel,
             stripComments=args.sc,
             verbose=args.v
@@ -96,12 +110,19 @@ def main(args: List[str]):
     for m in file.methods:
         if m.name in args.imethods:
             continue
-        if args.rm:  # Rename methods
+        if args.strmut:
+            mut = STRING_MUTATORS.get(args.strmut, None)
+            if mut is None:
+                raise Exception(f'Invalid string mutator "{args.strmut}"')
+            for c in m.codeLinesIter:
+                for s in c.parseStrings():
+                    mut.process(s)
+        if args.rall or args.rm:  # Rename methods
             file.renameMethod(m, name=vba.randomName(rml, rma), verbose=args.v)
-        if args.rp:  # Rename parameters
+        if args.rall or args.rp:  # Rename parameters
             for p in m.parameters:
                 m.renameParameter(p, vba.randomName(rpl, rpa), verbose=args.v)
-        if args.rv:  # Rename variables
+        if args.rall or args.rv:  # Rename variables
             for v in m.variables:
                 m.renameVariable(v, vba.randomName(rvl, rva), verbose=args.v)
 

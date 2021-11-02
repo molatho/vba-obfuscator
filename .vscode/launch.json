@@ -16,7 +16,13 @@
                 "-sel",
                 "-sc",
                 "-im",
-                "\"XorEncrypt\""
+                "\"XorEncrypt\"",
+                "\"StrEncoder\"",
+                "-rm",
+                "-rv",
+                "-rp",
+                "-strmut",
+                "split"
             ]
         }
     ]
